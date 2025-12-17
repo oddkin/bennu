@@ -98,30 +98,29 @@ The critical breakthrough is separating **compute traffic** (which can be split 
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Control Plane                           │
-│    ┌──────────┐    ┌──────────┐    ┌──────────────┐        │
-│    │   Git    │───▶│   API    │───▶│  Vault PKI   │        │
-│    │   Repo   │    │  Server  │    │              │        │
-│    └──────────┘    └──────────┘    └──────────────┘        │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Traffic Plane                             │
-│    ┌────────────┐           ┌────────────┐                  │
-│    │  Cluster   │◀─────────▶│  Cluster   │                  │
-│    │   Blue     │  Linkerd  │   Green    │                  │
-│    │ (Active)   │  Tunnel   │  (Target)  │                  │
-│    └────────────┘           └────────────┘                  │
-│         │                         │                          │
-│         ▼                         ▼                          │
-│    ┌────────────┐           ┌────────────┐                  │
-│    │   Redis    │──────────▶│   Redis    │                  │
-│    │  (Master)  │ Replication│ (Replica) │                  │
-│    └────────────┘           └────────────┘                  │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Control["Control Plane"]
+        Git[Git Repo] --> API[API Server]
+        API --> Vault[Vault PKI]
+    end
+    
+    subgraph Traffic["Traffic Plane"]
+        subgraph Blue["Cluster Blue (Active)"]
+            BlueApps[Applications]
+            BlueRedis[(Redis Master)]
+        end
+        
+        subgraph Green["Cluster Green (Target)"]
+            GreenApps[Applications]
+            GreenRedis[(Redis Replica)]
+        end
+        
+        Blue <-->|Linkerd mTLS Tunnel| Green
+        BlueRedis -->|Replication| GreenRedis
+    end
+    
+    Control --> Traffic
 ```
 
 ---
@@ -306,43 +305,37 @@ spec:
 
 Redis implements a Hot-Warm replication model:
 
-```
-┌────────────────────────────────┐
-│   Cluster Blue (Hot)           │
-│   ┌────────────────────┐       │
-│   │  Redis Master      │       │
-│   │  - Accept Writes   │       │
-│   └──────────┬─────────┘       │
-└──────────────┼─────────────────┘
-               │ Replication Stream
-               ▼
-┌──────────────┼─────────────────┐
-│   Cluster Green (Warm)         │
-│   ┌──────────▼─────────┐       │
-│   │  Redis Replica     │       │
-│   │  - Read-Only       │       │
-│   │  - Sync from Blue  │       │
-│   └────────────────────┘       │
-└────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Blue["Cluster Blue (Hot)"]
+        RedisMaster[(Redis Master<br/>Accept Writes)]
+    end
+    
+    subgraph Green["Cluster Green (Warm)"]
+        RedisReplica[(Redis Replica<br/>Read-Only)]
+    end
+    
+    RedisMaster -->|Replication Stream| RedisReplica
 ```
 
 ### Vault PKI
 
 Vault provides centralized certificate management enabling immediate cross-cluster trust:
 
-```
-Vault Root CA (Offline, Long-lived)
-    │
-    ├──► Intermediate CA: linkerd-us-east-1
-    │         │
-    │         ├──► Linkerd Identity Issuer (cluster-blue)
-    │         │         └──► Workload Certificates (blue pods)
-    │         │
-    │         └──► Linkerd Identity Issuer (cluster-green)
-    │                   └──► Workload Certificates (green pods)
-    │
-    └──► Intermediate CA: linkerd-eu-west-1
-              └──► ...
+```mermaid
+graph TD
+    Root[Vault Root CA<br/>Offline, Long-lived]
+    
+    Root --> IntUS[Intermediate CA<br/>linkerd-us-east-1]
+    Root --> IntEU[Intermediate CA<br/>linkerd-eu-west-1]
+    
+    IntUS --> IssuerBlue[Identity Issuer<br/>cluster-blue]
+    IntUS --> IssuerGreen[Identity Issuer<br/>cluster-green]
+    
+    IssuerBlue --> WorkloadBlue[Workload Certs<br/>Blue Pods]
+    IssuerGreen --> WorkloadGreen[Workload Certs<br/>Green Pods]
+    
+    IntEU --> IssuerOther[...]
 ```
 
 ### Flux GitOps
@@ -380,26 +373,23 @@ This is the key mechanism ensuring data consistency during rotation.
 
 ### Write Flow During Warm-Up
 
-```
-┌─────────────────────────────────────────┐
-│         Cluster Blue (Hot)              │
-│  ┌──────────────┐  ┌─────────────────┐ │
-│  │  App Pods    │  │  Redis Master   │ │
-│  │  Write Local │→→│  (Primary)      │ │
-│  └──────────────┘  └────────┬────────┘ │
-└───────────────────────────────┼─────────┘
-                                │ Replication
-                                ▼
-┌───────────────────────────────┼─────────┐
-│         Cluster Green (Warm)  │         │
-│  ┌──────────────┐  ┌──────────▼───────┐│
-│  │  App Pods    │  │  Redis Replica   ││
-│  │ Write Remote │→→│  (Read-Only)     ││
-│  │ (to Blue)    │  └──────────────────┘│
-│  └──────────────┘                      │
-│         │ (via redis-blue-mirror)      │
-│         └──────→ Linkerd Tunnel ──────►│
-└─────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Blue["Cluster Blue (Hot)"]
+        BlueApps[App Pods<br/>Write Local]
+        BlueMaster[(Redis Master)]
+        BlueApps --> BlueMaster
+    end
+    
+    subgraph Green["Cluster Green (Warm)"]
+        GreenApps[App Pods<br/>Write Remote]
+        GreenReplica[(Redis Replica<br/>Read-Only)]
+        Mirror[redis-blue-mirror]
+        GreenApps --> Mirror
+    end
+    
+    BlueMaster -->|Replication| GreenReplica
+    Mirror -->|Linkerd Tunnel| BlueMaster
 ```
 
 ---
@@ -414,36 +404,38 @@ At any point in time, we maintain three cluster identifiers in rotation:
 
 ### Rotation Cycle
 
-```
-Initial State:
-  Blue (Active) ──┐
-                  ├─→ Users
-  Red (Draining) ─┘
-
-Provision Green:
-  Blue (Active) ──┐
-                  ├─→ Users
-  Green (Warm) ───┘
-
-Link & Sync:
-  Blue (Hot Master) ═══► Green (Warm Replica)
-        │                     │
-        └──── Data Flow ─────►
-
-Traffic Shift:
-  Blue (90%) ─────┐
-                  ├─→ Users
-  Green (10%) ────┘
-
-Switchover:
-  Green (100%) ───┬─→ Users
-                  │
-  Blue (Draining) ┘
-
-Complete:
-  Green (Active) ──┐
-                   ├─→ Users
-  [Blue Destroyed] ┘
+```mermaid
+graph LR
+    subgraph S1["1. Initial State"]
+        B1[Blue Active] --> U1((Users))
+        R1[Red Draining] -.-> U1
+    end
+    
+    subgraph S2["2. Provision"]
+        B2[Blue Active] --> U2((Users))
+        G2[Green Warm]
+    end
+    
+    subgraph S3["3. Link & Sync"]
+        B3[Blue Hot] ==>|Data Flow| G3[Green Replica]
+    end
+    
+    subgraph S4["4. Traffic Shift"]
+        B4[Blue 90%] --> U4((Users))
+        G4[Green 10%] --> U4
+    end
+    
+    subgraph S5["5. Switchover"]
+        G5[Green 100%] --> U5((Users))
+        B5[Blue Draining]
+    end
+    
+    subgraph S6["6. Complete"]
+        G6[Green Active] --> U6((Users))
+        B6[Blue Destroyed]
+    end
+    
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6
 ```
 
 After rotation: Green → Blue, Blue → Red, and a new Green is created.
@@ -470,52 +462,25 @@ The system operates as a Finite State Machine (FSM) for each rotation event.
 
 ### State Diagram
 
-```
-         ┌──────────────┐
-    ┌───▶│ IDLE_STABLE  │◀────────────────────┐
-    │    └──────┬───────┘                     │
-    │           │ Start Rotation              │
-    │           ▼                             │
-    │    ┌──────────────┐                     │
-    │    │ PROVISIONING │                     │
-    │    └──────┬───────┘                     │
-    │           │ Cluster Ready               │
-    │           ▼                             │
-    │    ┌──────────────────┐                 │
-    │    │ BOOTSTRAPPING    │                 │
-    │    └──────┬───────────┘                 │
-    │           │ Flux Ready                  │
-    │           ▼                             │
-    │    ┌──────────────┐                     │
-    │    │ MESH_LINKING │                     │
-    │    └──────┬───────┘                     │
-    │           │ Link Ready                  │
-    │           ▼                             │
-    │    ┌──────────────┐                     │
-    │    │ DATA_SYNCING │                     │
-    │    └──────┬───────┘                     │
-    │           │ Replication Complete        │
-    │           ▼                             │
-    │    ┌───────────────┐                    │
-    │    │ TRAFFIC_CANARY│ ◀── Rollback Safe  │
-    │    └──────┬────────┘                    │
-    │           │ Health Validated            │
-    │           ▼                             │
-    │    ┌──────────────────┐                 │
-    │    │ SWITCHOVER_LOCKED│ (CRITICAL)      │
-    │    └──────┬───────────┘                 │
-    │           │ Promotion Complete          │
-    │           ▼                             │
-    │    ┌──────────────┐                     │
-    │    │  PROMOTED    │                     │
-    │    └──────┬───────┘                     │
-    │           │ DNS Updated                 │
-    │           ▼                             │
-    │    ┌──────────────┐                     │
-    │    │   DRAINING   │                     │
-    │    └──────┬───────┘                     │
-    │           │ Cleanup Complete            │
-    └───────────┴─────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE_STABLE
+    
+    IDLE_STABLE --> PROVISIONING: Start Rotation
+    PROVISIONING --> BOOTSTRAPPING: Cluster Ready
+    BOOTSTRAPPING --> MESH_LINKING: Flux Ready
+    MESH_LINKING --> DATA_SYNCING: Link Ready
+    DATA_SYNCING --> TRAFFIC_CANARY: Replication Complete
+    
+    TRAFFIC_CANARY --> SWITCHOVER_LOCKED: Health Validated
+    TRAFFIC_CANARY --> IDLE_STABLE: Rollback (Safe)
+    
+    SWITCHOVER_LOCKED --> PROMOTED: Promotion Complete
+    PROMOTED --> DRAINING: DNS Updated
+    DRAINING --> IDLE_STABLE: Cleanup Complete
+    
+    note right of SWITCHOVER_LOCKED: ⚠️ CRITICAL PHASE\n30-60 second write pause
+    note right of TRAFFIC_CANARY: Safe rollback point
 ```
 
 ---
@@ -524,20 +489,46 @@ The system operates as a Finite State Machine (FSM) for each rotation event.
 
 ### Complete Rotation Timeline (~2-3 hours)
 
-```
-Time    Phase                    Duration   Critical?
-──────────────────────────────────────────────────────
-T+0     Provision Green          10-15 min  No
-T+15    Bootstrap & Trust        5-10 min   No
-T+25    Mesh Linking             2-5 min    No
-T+30    Data Synchronization     5-30 min   No
-T+60    Traffic Canary (10%)     10-30 min  No
-T+90    Traffic Increase (50%)   10-30 min  No
-T+120   Switchover (Critical)    30-60 sec  YES ⚠️
-T+122   DNS Migration            5-10 min   No
-T+132   Cleanup Blue             5 min      No
-──────────────────────────────────────────────────────
-Total                            ~2-3 hours
+| Time | Phase | Duration | Critical? |
+|------|-------|----------|-----------|
+| T+0 | Provision Green | 10-15 min | No |
+| T+15 | Bootstrap & Trust | 5-10 min | No |
+| T+25 | Mesh Linking | 2-5 min | No |
+| T+30 | Data Synchronization | 5-30 min | No |
+| T+60 | Traffic Canary (10%) | 10-30 min | No |
+| T+90 | Traffic Increase (50%) | 10-30 min | No |
+| T+120 | Switchover | 30-60 sec | **YES ⚠️** |
+| T+122 | DNS Migration | 5-10 min | No |
+| T+132 | Cleanup Blue | 5 min | No |
+| **Total** | | **~2-3 hours** | |
+
+```mermaid
+gantt
+    title Cluster Rotation Timeline
+    dateFormat HH:mm
+    axisFormat %H:%M
+    
+    section Infrastructure
+    Provision Green          :p1, 00:00, 15m
+    Bootstrap Controllers    :p2, after p1, 10m
+    
+    section Networking
+    Mesh Linking            :n1, after p2, 5m
+    
+    section Data
+    Redis Replication       :d1, after n1, 30m
+    
+    section Traffic
+    Canary 10%              :t1, after d1, 15m
+    Canary 50%              :t2, after t1, 15m
+    Canary 90%              :t3, after t2, 15m
+    
+    section Critical
+    Switchover              :crit, c1, after t3, 2m
+    
+    section Cleanup
+    DNS Migration           :f1, after c1, 10m
+    Decommission            :f2, after f1, 5m
 ```
 
 ### Phase Details
@@ -747,27 +738,38 @@ rotation_duration = Histogram(
 
 The architecture supports multi-region deployments with independent operations:
 
-```
-us-east-1:
-  - Cluster Blue (Active)
-  - Cluster Green (Warm)
-  Path: /clusters/prod/us-east-1/...
+| Region | Clusters | Git Path |
+|--------|----------|----------|
+| us-east-1 | Blue (Active), Green (Warm) | `/clusters/prod/us-east-1/...` |
+| eu-west-1 | Blue (Active), Green (Warm) | `/clusters/prod/eu-west-1/...` |
 
-eu-west-1:
-  - Cluster Blue (Active)
-  - Cluster Green (Warm)
-  Path: /clusters/prod/eu-west-1/...
+```mermaid
+graph TB
+    subgraph US["US-East-1"]
+        USBlue[Cluster Blue<br/>Active]
+        USGreen[Cluster Green<br/>Warm]
+    end
+    
+    subgraph EU["EU-West-1"]
+        EUBlue[Cluster Blue<br/>Active]
+        EUGreen[Cluster Green<br/>Warm]
+    end
+    
+    Git[Git Repository] --> US
+    Git --> EU
+    Vault[Vault PKI] --> US
+    Vault --> EU
 ```
 
 ### Environment Segregation
 
 All environments share the same application definitions in `/catalogs`:
 
-```
-Production   → /clusters/prod/...
-Staging      → /clusters/staging/...
-Development  → /clusters/dev/...
-```
+| Environment | Git Path |
+|-------------|----------|
+| Production | `/clusters/prod/...` |
+| Staging | `/clusters/staging/...` |
+| Development | `/clusters/dev/...` |
 
 ---
 
