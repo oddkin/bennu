@@ -160,33 +160,35 @@ The Git repository separates immutable software definitions from mutable deploym
 
 ```
 /
-├── catalogs/                      # (Read-Only for API) Application definitions
-│   ├── infrastructure/            # Base infrastructure components
-│   │   ├── linkerd/              # Linkerd control plane manifests
-│   │   ├── apisix/               # APISIX ingress configuration
-│   │   ├── vault-agent/          # Vault integration
-│   │   └── cert-manager/         # Certificate management
+├── catalogs/                             # (Read-Only) Application definitions
 │   │
-│   ├── apps/                     # Application manifests
+│   ├── infrastructure/                   # Base infrastructure components
+│   │   ├── linkerd/                      #   Linkerd control plane manifests
+│   │   ├── apisix/                       #   APISIX ingress configuration
+│   │   ├── vault-agent/                  #   Vault integration
+│   │   └── cert-manager/                 #   Certificate management
+│   │
+│   ├── apps/                             # Application manifests
 │   │   ├── payment-service/
-│   │   │   ├── base/             # Helm charts / Base manifests
-│   │   │   └── variants/         # hot-writer / warm-reader configs
+│   │   │   ├── base/                     #   Helm charts / Base manifests
+│   │   │   └── variants/                 #   hot-writer / warm-reader configs
 │   │   └── redis/
 │   │
-│   └── profiles/                 # Groupings of applications
+│   └── profiles/                         # Groupings of applications
 │       └── backend-profile.yaml
 │
-└── clusters/                     # (Read-Write for API) Active deployment state
+└── clusters/                             # (Read-Write) Active deployment state
     └── prod/
         └── us-east-1/
-            ├── cluster-blue/     # The "Hot" Cluster
-            │   ├── cluster-config.yaml
-            │   ├── traffic-state.yaml       # Write pointer configuration
-            │   ├── ingress-routing.yaml     # Traffic split weights
-            │   ├── profile-sync.yaml
-            │   └── links/                   # Linkerd connections
             │
-            └── cluster-green/    # The "Warm" Cluster
+            ├── cluster-blue/             # The "Hot" Cluster
+            │   ├── cluster-config.yaml
+            │   ├── traffic-state.yaml    #   Write pointer configuration
+            │   ├── ingress-routing.yaml  #   Traffic split weights
+            │   ├── profile-sync.yaml
+            │   └── links/                #   Linkerd connections
+            │
+            └── cluster-green/            # The "Warm" Cluster
                 └── ...
 ```
 
